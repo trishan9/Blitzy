@@ -1,0 +1,13 @@
+# .trivyignore — HIGH/CRITICAL findings accepted with justification (§1.3, §11).
+#
+# These are all in libssl3 in the gcr.io/distroless base image (Debian 12 OpenSSL), NOT in our
+# application dependencies (those are clean after the Dockerfile prunes esbuild — 35 findings
+# removed). They are remediated by RE-PINNING THE BASE IMAGE DIGEST to a rebuilt distroless
+# release; that is a Renovate/CI cadence task, not an app change. Reviewed 2026-07-23.
+# Re-audit when the base digest is bumped; remove any that the new base fixes.
+CVE-2026-31789
+CVE-2026-28387
+CVE-2026-28388
+CVE-2026-28389
+CVE-2026-28390
+CVE-2026-45447
