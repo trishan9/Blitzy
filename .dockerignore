@@ -1,0 +1,26 @@
+# Never let secrets or local state into an image layer (brief §11 — the most
+# common way secrets end up in a published image; layers are extractable).
+**/.env
+**/.env.*
+!**/.env.example
+**/.git
+**/.gitignore
+**/node_modules
+**/dist
+**/build
+**/coverage
+**/.vscode
+**/.idea
+**/.agent
+**/.commandcode
+**/.testsprite
+docs/
+prds/
+testsprite_tests/
+**/*.log
+**/npm-debug.log*
+**/.DS_Store
+# Secrets material — mounted at runtime via Docker secrets, never baked in.
+secrets/
+**/*.pem
+**/*.key
