@@ -1,0 +1,108 @@
+
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request: {}
+
+permissions:
+  contents: read
+
+jobs:
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env: { GITLEAKS_VERSION: latest }
+
+  semgrep:
+    runs-on: ubuntu-latest
+    container: { image: semgrep/semgrep }
+    steps:
+      - uses: actions/checkout@v4
+      - run: semgrep ci --config auto --config p/typescript --config p/nodejs --config p/owasp-top-ten --error
+        env: { SEMGREP_RULES: "p/default" }
+
+  osv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google/osv-scanner-action@v1
+        with: { scan-args: "--lockfile=backend/package-lock.json" }
+
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env: { POSTGRES_PASSWORD: postgres, POSTGRES_DB: ecommerce }
+        ports: ["55433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["56379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: backend/package-lock.json }
+      - working-directory: backend
+        run: npm ci
+      - working-directory: backend
+        run: npx tsc --noEmit
+      - name: bootstrap db (roles + migrations)
+        working-directory: backend
+        env: { PGPASSWORD: postgres }
+        run: |
+          psql -h localhost -p 55433 -U postgres -d ecommerce -v ON_ERROR_STOP=1 \
+            -v rw_pw=rwpass -v ro_pw=ropass -v mig_pw=migpass -f ../infra/postgres/db-setup.sql
+          PGPASSWORD=migpass psql -h localhost -p 55433 -U migrator -d ecommerce -v ON_ERROR_STOP=1 -f src/db/migrations/0000_initial_schema.sql
+          PGPASSWORD=migpass psql -h localhost -p 55433 -U migrator -d ecommerce -v ON_ERROR_STOP=1 -f src/db/migrations/0001_force_rls_and_grants.sql
+      - name: offline suite
+        working-directory: backend
+        run: npm run verify
+      - name: live + e2e suite
+        working-directory: backend
+        env:
+          PGHOST: localhost
+          PGPORT: 55433
+          PGPW_MIG: migpass
+          PGPW_RW: rwpass
+          REDIS_URL: redis://localhost:56379
+          DATABASE_URL: postgres://app_rw:rwpass@localhost:55433/ecommerce
+          BETTER_AUTH_URL: http://localhost:8000
+          APP_URL: http://localhost:8000
+          JWT_ISS: http://localhost:8000
+          JWT_AUD: ecommerce-api
+        run: |
+
+          export BETTER_AUTH_SECRET="$(openssl rand -base64 36)"
+          export CRYPTO_MASTER_KEY="$(openssl rand -base64 32)"
+          export BLIND_INDEX_PEPPER="$(openssl rand -hex 16)"
+          export GUEST_CART_SECRET="$(openssl rand -hex 16)"
+          npm run verify:live && npm run demo:pairs
+
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build api image
+        run: docker build -t ecommerce-api:ci backend
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ecommerce-api:ci
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+          trivyignores: backend/.trivyignore
+      - name: SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: ecommerce-api:ci
+          format: cyclonedx
+          output: sbom.cdx.json
+      - uses: actions/upload-artifact@v4
+        with: { name: sbom, path: sbom.cdx.json }
