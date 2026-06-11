@@ -1,0 +1,230 @@
+name: blitzy
+
+x-restart: &restart
+  restart: unless-stopped
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  suricata_logs:
+  pg_data:
+  redis_data:
+  mongo_data:
+  uploads:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  nginx_logs:
+  wazuh_indexer_data:
+
+services:
+  postgres:
+    <<: *restart
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ecommerce
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./infra/postgres/00-init.sh:/docker-entrypoint-initdb.d/00-init.sh:ro
+      - ./infra/postgres/db-setup.sql:/docker-entrypoint-initdb.d/db-setup.sql:ro
+    ports: ["127.0.0.1:55433:5432"]
+    networks: [internal]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ecommerce"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    secrets: [postgres_password, app_rw_pw, app_ro_pw, migrator_pw]
+
+  redis:
+    <<: *restart
+    image: redis:7-alpine
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$(cat /run/secrets/redis_password)\" --save 60 1"]
+    volumes: [redis_data:/data]
+    ports: ["127.0.0.1:56379:6379"]
+    networks: [internal]
+    security_opt: [no-new-privileges:true]
+    secrets: [redis_password]
+
+  mongo:
+    <<: *restart
+    image: mongo:7
+    command: ["--bind_ip_all"]
+    volumes: [mongo_data:/data/db]
+    ports: ["127.0.0.1:57017:27017"]
+    networks: [internal]
+    security_opt: [no-new-privileges:true]
+
+  api:
+    <<: *restart
+    profiles: ["app"]
+    build: ./backend
+    image: ecommerce-api:latest
+    user: "65532:65532"
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    env_file: [./backend/.env]
+    environment:
+      DATABASE_URL: postgres://app_rw:${APP_RW_PW}@postgres:5432/ecommerce
+      REDIS_URL: redis://:${REDIS_PW}@redis:6379
+      MONGO_URI: mongodb://mongo:27017/activity_log
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+      mongo: { condition: service_started }
+    volumes: [uploads:/app/uploads]
+    networks: [internal]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512M, pids: 200 }
+
+  nginx:
+    <<: *restart
+    profiles: ["app"]
+    image: owasp/modsecurity-crs:4.28.0-nginx-alpine-202607160307@sha256:b6fc9648675f7749881fda6ba31c30ce8240529fb76c0ea090afe66a0494c2d0
+    depends_on: [api]
+    ports: ["8080:8080"]
+    environment:
+      BACKEND: "http://api:8000"
+      SERVER_NAME: "localhost"
+      PORT: "8080"
+      SERVER_TOKENS: "off"
+      MODSEC_RULE_ENGINE: "On"
+      BLOCKING_PARANOIA: "1"
+      MODSEC_AUDIT_LOG_FORMAT: "JSON"
+      MODSEC_AUDIT_LOG: "/var/log/nginx/modsec_audit.log"
+    volumes:
+      - ./infra/nginx/templates/conf.d/default.conf.template:/etc/nginx/templates/conf.d/default.conf.template:ro
+      - nginx_logs:/var/log/nginx
+    networks: [internal]
+    security_opt: [no-new-privileges:true]
+
+  wazuh-indexer:
+    <<: *restart
+    profiles: ["detection"]
+    image: wazuh/wazuh-indexer:4.9.0
+    environment:
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      discovery.type: single-node
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    volumes:
+      - wazuh_indexer_data:/var/lib/wazuh-indexer
+      - ./infra/detection/wazuh/opensearch.yml:/usr/share/wazuh-indexer/opensearch.yml
+    networks:
+      internal:
+        aliases: [wazuh.indexer]
+
+  wazuh-dashboard:
+    <<: *restart
+    profiles: ["detection"]
+    image: wazuh/wazuh-dashboard:4.9.0
+    depends_on: [wazuh-indexer]
+    environment:
+      OPENSEARCH_HOSTS: '["http://wazuh-indexer:9200"]'
+      WAZUH_API_URL: "https://wazuh"
+      DASHBOARD_USERNAME: kibanaserver
+      DASHBOARD_PASSWORD: ${WAZUH_DASHBOARD_PASSWORD:?set WAZUH_DASHBOARD_PASSWORD}
+      API_USERNAME: wazuh-wui
+      API_PASSWORD: ${WAZUH_API_PASSWORD:?set WAZUH_API_PASSWORD}
+      SERVER_SSL_ENABLED: "false"
+    entrypoint: ["/bin/bash", "-c", "rm -rf /usr/share/wazuh-dashboard/plugins/securityDashboards && exec /entrypoint.sh"]
+    volumes:
+      - ./infra/detection/wazuh/opensearch_dashboards.yml:/usr/share/wazuh-dashboard/config/opensearch_dashboards.yml:ro
+    ports: ["127.0.0.1:5601:5601"]
+    networks: [internal]
+
+  prometheus:
+    <<: *restart
+    profiles: ["detection"]
+    image: prom/prometheus:v3.4.1
+    ports: ["127.0.0.1:9090:9090"]
+    volumes:
+      - ./infra/detection/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/detection/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    networks: [internal]
+
+  loki:
+    <<: *restart
+    profiles: ["detection"]
+    image: grafana/loki:3.5.0
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    volumes:
+      - ./infra/detection/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    networks: [internal]
+
+  promtail:
+    <<: *restart
+    profiles: ["detection"]
+    image: grafana/promtail:3.5.0
+    command: ["-config.file=/etc/promtail/promtail-config.yml"]
+    volumes:
+      - ./infra/detection/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [internal]
+
+  grafana:
+    <<: *restart
+    profiles: ["detection"]
+    image: grafana/grafana:12.0.1
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/detection/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/detection/grafana/dashboards:/etc/grafana/dashboards:ro
+    ports: ["127.0.0.1:3000:3000"]
+    networks: [internal]
+    secrets: [grafana_password]
+
+  suricata:
+    <<: *restart
+    profiles: ["detection"]
+    image: jasonish/suricata:7.0
+    network_mode: "service:api"
+    depends_on: [api]
+    cap_add: [NET_ADMIN, NET_RAW, SYS_NICE]
+    command: ["-i", "eth0", "-v"]
+    volumes:
+      - ./infra/detection/suricata/custom.rules:/etc/suricata/rules/custom.rules
+      - suricata_logs:/var/log/suricata
+
+  wazuh:
+    <<: *restart
+    profiles: ["detection"]
+    image: wazuh/wazuh-manager:4.9.0
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 655360, hard: 655360 }
+    volumes:
+      - ./infra/detection/wazuh/ossec.conf:/var/ossec/etc/ossec.conf
+      - ./infra/detection/wazuh/filebeat.yml:/etc/filebeat/filebeat.yml
+      - ./infra/detection/wazuh/wazuh-template.json:/etc/filebeat/wazuh-template.json
+      - ./infra/detection/wazuh/ar.conf:/var/ossec/etc/shared/ar.conf
+      - ./logs:/logs/app:ro
+      - ./infra/detection/wazuh/local_rules.xml:/var/ossec/etc/rules/local_rules.xml:ro
+      - ./infra/detection/wazuh/local_decoder.xml:/var/ossec/etc/decoders/local_decoder.xml:ro
+      - nginx_logs:/logs/nginx:ro
+    networks: [internal]
+
+secrets:
+  postgres_password: { environment: POSTGRES_PASSWORD }
+  app_rw_pw:         { environment: APP_RW_PW }
+  app_ro_pw:         { environment: APP_RO_PW }
+  migrator_pw:       { environment: MIGRATOR_PW }
+  redis_password:    { environment: REDIS_PW }
+  grafana_password:  { environment: GRAFANA_PW }
