@@ -1,0 +1,23 @@
+groups:
+  - name: ecommerce
+    rules:
+      - alert: DenialOfWallet
+        expr: sum(rate(ai_tokens_spent_total[5m])) > 1000
+        for: 2m
+        labels: { severity: page }
+        annotations: { summary: "AI token spend over budget (possible denial of wallet)" }
+      - alert: RateLimitStorm
+        expr: sum(rate(rate_limit_tripped_total[1m])) > 20
+        for: 1m
+        labels: { severity: warning }
+        annotations: { summary: "Rate-limit trips spiking (brute force / scraping)" }
+      - alert: ErrorRateHigh
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "5xx error rate above 5%" }
+      - alert: AuthFailureBurst
+        expr: sum(rate(auth_login_failure_total[5m])) > 5
+        for: 2m
+        labels: { severity: warning }
+        annotations: { summary: "Login failure rate elevated (T1110 brute force)" }
