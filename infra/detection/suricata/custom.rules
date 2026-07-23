@@ -1,0 +1,21 @@
+# custom.rules — Suricata (network IDS on the docker bridge). ET Open provides the base;
+# these are the endpoint-specific additions (§13). SIDs in the local range 1000000+.
+
+# SSRF: the API container reaching an INTERNAL/metadata destination is never legitimate
+# outbound traffic — the app's only allowed egress is the SSRF allowlist. (T1190/T1552)
+alert ip $API_NET any -> 169.254.169.254 any (msg:"SSRF: API -> cloud metadata 169.254.169.254"; sid:1000001; rev:1; classtype:web-application-attack;)
+alert ip $API_NET any -> 10.0.0.0/8 any (msg:"SSRF: API -> RFC1918 10/8"; sid:1000002; rev:1; classtype:web-application-attack;)
+alert ip $API_NET any -> 172.16.0.0/12 any (msg:"SSRF: API -> RFC1918 172.16/12"; sid:1000003; rev:1; classtype:web-application-attack;)
+alert ip $API_NET any -> 192.168.0.0/16 any (msg:"SSRF: API -> RFC1918 192.168/16"; sid:1000004; rev:1; classtype:web-application-attack;)
+
+# SQL injection signatures on inbound API traffic (T1190). Backstop to ModSecurity CRS.
+alert http any any -> $API_NET any (msg:"SQLi: UNION SELECT in query"; flow:to_server; content:"union"; nocase; http_uri; content:"select"; nocase; http_uri; distance:0; sid:1000010; rev:1; classtype:web-application-attack;)
+alert http any any -> $API_NET any (msg:"SQLi: time-based (pg_sleep/SLEEP)"; flow:to_server; pcre:"/(pg_sleep|sleep)\s*\(/i"; sid:1000011; rev:1; classtype:web-application-attack;)
+alert http any any -> $API_NET any (msg:"SQLi: stacked query / DROP TABLE"; flow:to_server; content:"drop"; nocase; content:"table"; nocase; distance:0; within:16; sid:1000012; rev:1; classtype:web-application-attack;)
+
+# JWT tampering fingerprint: alg:none in an Authorization bearer (T1550). (base64 of {"alg":"none")
+alert http any any -> $API_NET any (msg:"JWT: alg none in Authorization header"; flow:to_server; content:"Authorization|3a| Bearer "; http_header; pcre:"/eyJhbGciOiJub25lI/"; sid:1000020; rev:1; classtype:policy-violation;)
+
+# Horizontal scanning / IDOR enumeration: many distinct /api/orders/<uuid> in a short window is
+# better detected in Wazuh (session-correlated 404 bursts) — Suricata flags raw rate here.
+alert http any any -> $API_NET any (msg:"Enumeration: high-rate /api/orders/ requests"; flow:to_server; content:"/api/orders/"; http_uri; threshold:type both,track by_src,count 40,seconds 10; sid:1000030; rev:1; classtype:attempted-recon;)
