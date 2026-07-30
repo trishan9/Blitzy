@@ -32,4 +32,4 @@ login.json
 *.session
 .blitzy-*
 
-docs/burp/*.txt
+docs
