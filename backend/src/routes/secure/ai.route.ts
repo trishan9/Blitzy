@@ -137,8 +137,13 @@ async function audit(actorId: string, action: string, metadata: Record<string, u
 async function callModel(model: string, systemPrompt: string, question: string): Promise<string> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new ScannerUnavailable();
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Number(process.env.AI_TIMEOUT_MS ?? 20_000));
+  let res: Awaited<ReturnType<typeof fetch>>;
+  try {
+    res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
+    signal: controller.signal,
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${apiKey}`,
@@ -151,12 +156,22 @@ async function callModel(model: string, systemPrompt: string, question: string):
         { role: "user", content: question },
       ],
     }),
-  });
+    });
+  } catch (e) {
+    logger.error({ err: String(e) }, "AI provider call did not complete");
+    const err: any = new Error("model call failed: no response");
+    err.httpStatus = 502;
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     const code = /"code"\s*:\s*"([^"]+)"/.exec(detail)?.[1];
     logger.error({ upstreamStatus: res.status, code }, "AI provider call failed");
-    throw new Error(`model call failed: ${res.status}`);
+    const err: any = new Error(`model call failed: ${res.status}`);
+    err.httpStatus = 502;
+    throw err;
   }
   const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
   return body.choices?.[0]?.message?.content ?? "";

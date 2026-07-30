@@ -170,7 +170,8 @@ router.get("/:key", allowMethods("GET"), async (req: Request, res: Response, nex
     if (!obj) { res.status(404).json({ error: "not found" }); return; }
     for (const [h, v] of Object.entries(serveHeaders)) res.setHeader(h, v);
     res.setHeader("Content-Type", obj.contentType);
-
+    res.setHeader("Content-Length", String(obj.buffer.length));
+    res.end(obj.buffer);
   } catch (e) { next(e); }
 });
 

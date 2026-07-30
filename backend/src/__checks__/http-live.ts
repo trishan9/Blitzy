@@ -105,19 +105,23 @@ async function main() {
     .set("Cookie", aliceCookie).set("Origin", ORIGIN).set("Sec-Fetch-Site", "cross-site").send({});
   ok(secFetch.status === 403, `Sec-Fetch-Site: cross-site rejected (${secFetch.status})`);
 
-  const sameSiteAllowed = await request(app).post("/api/orders/checkout")
-    .set("Cookie", aliceCookie).set("Origin", ORIGIN).set("Sec-Fetch-Site", "same-site").send({});
-  ok(sameSiteAllowed.status !== 403,
-    `Sec-Fetch-Site: same-site reaches the origin check (${sameSiteAllowed.status})`);
-  const sameSiteBadOrigin = await request(app).post("/api/orders/checkout")
-    .set("Cookie", aliceCookie).set("Origin", "https://evil.com")
-    .set("Sec-Fetch-Site", "same-site").send({});
-  ok(sameSiteBadOrigin.status === 403,
-    `Sec-Fetch-Site: same-site with a disallowed Origin still rejected (${sameSiteBadOrigin.status})`);
-
   const noCsrfToken = await request(app).post("/api/orders/checkout")
     .set("Cookie", aliceCookie).set("Origin", ORIGIN).set("Sec-Fetch-Site", "same-origin").send({});
   ok(noCsrfToken.status === 403, `missing CSRF token rejected, not skipped (${noCsrfToken.status})`);
+
+  const sameSite = await request(app).post("/api/orders/checkout")
+    .set("Cookie", aliceCookie).set("Origin", ORIGIN).set("Sec-Fetch-Site", "same-site").send({});
+  ok(sameSite.status === noCsrfToken.status &&
+     sameSite.body?.error === noCsrfToken.body?.error,
+    `same-site is handled exactly like same-origin, so the origin check does not refuse it ` +
+    `(${sameSite.status} "${sameSite.body?.error}" vs ${noCsrfToken.status} "${noCsrfToken.body?.error}")`);
+  const sameSiteBadOrigin = await request(app).post("/api/orders/checkout")
+    .set("Cookie", aliceCookie).set("Origin", "https://evil.com")
+    .set("Sec-Fetch-Site", "same-site").send({});
+  ok(sameSiteBadOrigin.status === 403 &&
+     sameSiteBadOrigin.body?.error === "cross-site request rejected",
+    `same-site with a disallowed Origin is still refused by the origin check ` +
+    `(${sameSiteBadOrigin.status})`);
 
   const anon = await request(app).get("/api/orders");
   ok(anon.status === 401, `unauthenticated => 401 (${anon.status})`);
